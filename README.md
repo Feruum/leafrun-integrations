@@ -1,47 +1,13 @@
 # leafrun-integrations
 
-Planned Git and cloud integrations: OAuth connections, synchronization and conflict handling.
+## Get projects from Git and cloud sources
 
-**Status: planned component.** This repository currently contains its scope and roadmap links. It does not yet provide a runnable service or package. The existing local rendering prototype lives in [leafrun-generation](https://github.com/leafrun/leafrun-generation).
+The planned integration service will connect external accounts, fetch source revisions, and send local changes back. Users need a visible sync state and a way to resolve conflicts; a successful download alone is not synchronization.
 
-## Responsibility
+Projects keeps metadata about a source. Collaboration receives shared changes, while Sync Core supplies reusable state and diff logic.
 
-Connections, OAuth provider state, sync cursors, conflicts, external data snapshots.
+**Status:** this repository is a planned component. It has no runnable implementation yet. The working local renderer is in [leafrun-generation](https://github.com/leafrun/leafrun-generation).
 
-Owns the logical PostgreSQL database `integrations_db`, its credentials and migrations. Other domains access this data through contracts, never cross-domain SQL.
+**First roadmap step:** [LEA-12 — Fetch a fixed source revision](https://linear.app/bulnik/issue/LEA-12/e02-istochniki-proekta-i-neizmenyaemye-snimki). Linear may require workspace access; the public [roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md) explains the build order. See the [repository map](https://github.com/leafrun/leafrun/blob/main/docs/repositories.md) and [contribution guide](https://github.com/leafrun/leafrun/blob/main/CONTRIBUTING.md).
 
-Planned process roles:
-
-- `api-webhook-ingress`
-- `sync-workflow-workers`
-- `connector-activity-workers`
-
-## Dependencies
-
-- [leafrun-contracts](https://github.com/leafrun/leafrun-contracts)
-- [leafrun-platform](https://github.com/leafrun/leafrun-platform)
-- `sync-core`
-- `collaboration-api`
-- `storage-api`
-- `secret-store`
-
-## Boundaries
-
-No unique durable local state; activity scratch and workflow replay cache disposable. API and worker processes scale and release independently. S3 holds bytes; domain databases hold durable metadata. Redis is a disposable cache; NATS JetStream carries domain events; Temporal owns workflow task queues.
-
-## Roadmap
-
-- [LEA-12 — Project sources and immutable snapshots](https://linear.app/bulnik/issue/LEA-12/e02-istochniki-proekta-i-neizmenyaemye-snimki)
-- [LEA-73 — Two-way synchronization](https://linear.app/bulnik/issue/LEA-73/e10-dvustoronnyaya-sinhronizaciya)
-- [LEA-82 — Live collaboration and project ownership](https://linear.app/bulnik/issue/LEA-82/e11-live-collaboration-i-vladelec-proekta)
-- [LEA-122 — Future capabilities: discovery](https://linear.app/bulnik/issue/LEA-122/e16-dalnejshie-vozmozhnosti-issledovanie)
-
-See the [development roadmap](https://github.com/leafrun/leafrun/blob/main/docs/roadmap.md) for dependencies and acceptance milestones. Creating this repository does not complete its implementation issues.
-
-## Contributing
-
-Use English for code comments, documentation, examples, commit messages and pull requests. See the [contribution guide](https://github.com/leafrun/leafrun/blob/main/CONTRIBUTING.md) and [current architecture](https://github.com/leafrun/leafrun/blob/main/docs/architecture.md).
-
-## License status
-
-A project license has not been selected. No license is assigned by this repository scaffold.
+No project license has been selected yet.
