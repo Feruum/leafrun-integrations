@@ -95,6 +95,35 @@ func protectLocalGit(ctx context.Context, r *gitRunner, location string) ([]Nati
 		if err != nil {
 			return nil, "", err
 		}
+		root, err := os.OpenRoot(working)
+		if err != nil {
+			return nil, "", err
+		}
+		info, statErr := root.Lstat(".git")
+		if statErr == nil && info.Mode().IsRegular() {
+			file, openErr := root.OpenFile(".git", nativeGuardOpenFlags(), 0)
+			if openErr != nil {
+				_ = root.Close()
+				return nil, "", openErr
+			}
+			frozen, freezeErr := file.Stat()
+			closeErr := file.Close()
+			if err := errors.Join(freezeErr, closeErr); err != nil {
+				_ = root.Close()
+				return nil, "", err
+			}
+			if !frozen.Mode().IsRegular() {
+				_ = root.Close()
+				return nil, "", errors.New("Git indirection file changed to a non-regular entry")
+			}
+			guards = append(guards, NativeProtection{Path: filepath.Join(working, ".git"), Info: frozen})
+		} else if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+			_ = root.Close()
+			return nil, "", statErr
+		}
+		if err := root.Close(); err != nil {
+			return nil, "", err
+		}
 	}
 	return guards, working, nil
 }

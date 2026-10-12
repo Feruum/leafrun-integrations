@@ -48,19 +48,21 @@ func runNative(ctx context.Context, cmd *exec.Cmd, consume func(io.Reader) error
 	wait := make(chan error, 1)
 	go func() { wait <- cmd.Wait() }()
 	var cause, readErr, waitErr error
+	var stopErr error
+	stop := func() { stopErr = errors.Join(stopErr, group.kill(cmd)) }
 	readDone, waitDone := false, false
 	for !waitDone {
 		select {
 		case <-ctx.Done():
 			cause = ctx.Err()
-			_ = group.kill(cmd)
+			stop()
 			waitErr = <-wait
 			waitDone = true
 		case readErr = <-outRead:
 			readDone = true
 			outRead = nil
 			if readErr != nil {
-				_ = group.kill(cmd)
+				stop()
 			}
 		case waitErr = <-wait:
 			waitDone = true
@@ -81,7 +83,7 @@ func runNative(ctx context.Context, cmd *exec.Cmd, consume func(io.Reader) error
 	if waitErr != nil && len(stderr.data) != 0 {
 		waitErr = &nativeError{cause: waitErr, diagnostic: redactTransport(string(stderr.data))}
 	}
-	return errors.Join(cause, readErr, waitErr, stderrErr, killErr)
+	return errors.Join(cause, readErr, waitErr, stderrErr, stopErr, killErr)
 }
 
 type nativeError struct {

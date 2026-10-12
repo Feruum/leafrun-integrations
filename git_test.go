@@ -25,6 +25,10 @@ func fixtureGit(t *testing.T, dir string, args ...string) string {
 func gitFixture(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixtureGit(t, dir, "init", "-b", "main")
 	if err := os.MkdirAll(filepath.Join(dir, "project space", "日本語"), 0700); err != nil {
 		t.Fatal(err)

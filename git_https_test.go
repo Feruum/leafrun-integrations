@@ -50,6 +50,11 @@ func privateHTTPFixture(t *testing.T) (string, *atomic.Int64) {
 }
 
 func privateHTTPFixtureGate(t *testing.T, gate func(*http.Request)) (string, *atomic.Int64) {
+	url, count, _ := privateHTTPFixtureScoped(t, gate)
+	return url, count
+}
+
+func privateHTTPFixtureScoped(t *testing.T, gate func(*http.Request)) (string, *atomic.Int64, string) {
 	t.Helper()
 	repo, _ := gitFixture(t)
 	base := t.TempDir()
@@ -124,7 +129,7 @@ func privateHTTPFixtureGate(t *testing.T, gate func(*http.Request)) (string, *at
 	t.Setenv("GIT_CONFIG_GLOBAL", config)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("LEAFRUN_TEST_CREDENTIAL_HELPER", "1")
-	return server.URL + "/repo.git", &accepted
+	return server.URL + "/repo.git", &accepted, config
 }
 
 func TestGitCancellationDuringNativeHTTPSFetch(t *testing.T) {
@@ -202,8 +207,7 @@ func TestGitPrivateHTTPSNativeCredentialsTLSAndRedaction(t *testing.T) {
 }
 
 func TestGitUntrustedTLSCannotBeDisabledByScopedNativeConfig(t *testing.T) {
-	url, _ := privateHTTPFixture(t)
-	config := os.Getenv("GIT_CONFIG_GLOBAL")
+	url, _, config := privateHTTPFixtureScoped(t, nil)
 	fixtureGit(t, filepath.Dir(config), "config", "--file", config, "--unset", "http.sslCAInfo")
 	fixtureGit(t, filepath.Dir(config), "config", "--file", config, "http."+url+".sslVerify", "false")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

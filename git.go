@@ -73,10 +73,18 @@ func (s GitSource) Open(ctx context.Context) (tree SourceTree, err error) {
 	if err != nil {
 		return SourceTree{}, sourceErr(ErrorInput, "native git", location, err)
 	}
+	transport, err := runner.transport(ctx, location)
+	if err != nil {
+		return SourceTree{}, err
+	}
+	effective, local, err := gitLocation(transport.effective)
+	if err != nil {
+		return SourceTree{}, sourceErr(ErrorOptions, "effective repository", redactTransport(transport.effective), err)
+	}
 	var protection []NativeProtection
 	var workingDirectory string
 	if local {
-		protection, workingDirectory, err = protectLocalGit(ctx, runner, location)
+		protection, workingDirectory, err = protectLocalGit(ctx, runner, effective)
 		if err != nil {
 			return SourceTree{}, err
 		}
@@ -206,11 +214,14 @@ func gitLocation(input string) (string, bool, error) {
 }
 
 type gitRunner struct {
-	binary string
-	dir    string
-	env    []string
-	config []string
+	binary     string
+	dir        string
+	env        []string
+	config     []string
+	transports map[string]gitTransport
 }
+
+type gitTransport struct{ effective, alias string }
 
 func newGitRunner(w *ownedWorkspace, options GitOptions) (*gitRunner, error) {
 	binary, err := exec.LookPath("git")
@@ -259,15 +270,46 @@ func (r *gitRunner) verifyTransport(location string) {
 	}
 }
 
+// Ask native Git to apply its longest-prefix insteadOf rules without contacting
+// the transport. A private operation alias freezes that one resolved URL: Git
+// rewrites each URL once, so the expanded URL cannot trigger a second rewrite.
+// Authentication still uses the effective URL and the existing native helpers.
+func (r *gitRunner) transport(ctx context.Context, location string) (gitTransport, error) {
+	if cached, ok := r.transports[location]; ok {
+		return cached, nil
+	}
+	data, err := r.output(ctx, "ls-remote", "--get-url", "--", location)
+	if err != nil {
+		return gitTransport{}, sourceErr(ErrorInput, "expand native git URL", redactTransport(location), err)
+	}
+	effective := strings.TrimSuffix(strings.TrimSuffix(data, "\n"), "\r")
+	effective, _, err = gitLocation(effective)
+	if err != nil {
+		return gitTransport{}, sourceErr(ErrorOptions, "effective repository", redactTransport(data), err)
+	}
+	r.verifyTransport(effective)
+	if r.transports == nil {
+		r.transports = make(map[string]gitTransport)
+	}
+	alias := fmt.Sprintf("leafrun-transport-%s-%d", filepath.Base(r.dir), len(r.transports))
+	r.config = append(r.config, "-c", "url."+effective+".insteadOf="+alias)
+	transport := gitTransport{effective: effective, alias: alias}
+	r.transports[location] = transport
+	return transport, nil
+}
+
 func resolveGitRef(ctx context.Context, r *gitRunner, location, ref string) (string, error) {
-	r.verifyTransport(location)
+	transport, err := r.transport(ctx, location)
+	if err != nil {
+		return "", err
+	}
 	patterns := []string{ref}
 	if !strings.HasPrefix(ref, "refs/") {
 		patterns = []string{"refs/heads/" + ref, "refs/tags/" + ref, "refs/tags/" + ref + "^{}"}
 	} else if strings.HasPrefix(ref, "refs/tags/") {
 		patterns = append(patterns, ref+"^{}")
 	}
-	data, err := r.output(ctx, append([]string{"ls-remote", "--", location}, patterns...)...)
+	data, err := r.output(ctx, append([]string{"ls-remote", "--", transport.alias}, patterns...)...)
 	if err != nil {
 		return "", sourceErr(ErrorInput, "resolve git ref", redactTransport(location), err)
 	}
@@ -322,7 +364,10 @@ func resolveGitRef(ctx context.Context, r *gitRunner, location, ref string) (str
 }
 
 func acquireGitCommit(ctx context.Context, r *gitRunner, location, commit string) error {
-	r.verifyTransport(location)
+	transport, err := r.transport(ctx, location)
+	if err != nil {
+		return err
+	}
 	format := "sha1"
 	if len(commit) == 64 {
 		format = "sha256"
@@ -330,7 +375,7 @@ func acquireGitCommit(ctx context.Context, r *gitRunner, location, commit string
 	if _, err := r.output(ctx, "init", "--bare", "--template=", "--object-format="+format, filepath.Join(r.dir, "objects.git")); err != nil {
 		return sourceErr(ErrorInput, "init git objects", "", err)
 	}
-	err := runNative(ctx, r.objects("fetch", "--no-tags", "--depth=1", "--no-write-fetch-head", "--recurse-submodules=no", "--no-auto-maintenance", "--", location, commit), func(reader io.Reader) error { _, err := io.Copy(io.Discard, reader); return err })
+	err = runNative(ctx, r.objects("fetch", "--no-tags", "--depth=1", "--no-write-fetch-head", "--recurse-submodules=no", "--no-auto-maintenance", "--", transport.alias, commit), func(reader io.Reader) error { _, err := io.Copy(io.Discard, reader); return err })
 	if err != nil {
 		return sourceErr(ErrorInput, "fetch resolved git commit", redactTransport(location), err)
 	}
