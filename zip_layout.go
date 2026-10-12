@@ -153,16 +153,17 @@ func zipLocalOffset(header [46]byte, extra []byte) (uint64, error) {
 	if binary.LittleEndian.Uint16(header[34:36]) != 0 {
 		return 0, zip.ErrFormat
 	}
-	if offset != 0xffffffff {
-		return offset, nil
-	}
-	for len(extra) >= 4 {
+	needOffset := offset == 0xffffffff
+	for len(extra) > 0 {
+		if len(extra) < 4 {
+			return 0, zip.ErrFormat
+		}
 		id, length := binary.LittleEndian.Uint16(extra[:2]), int(binary.LittleEndian.Uint16(extra[2:4]))
 		if length > len(extra)-4 {
 			return 0, zip.ErrFormat
 		}
 		field := extra[4 : 4+length]
-		if id == 1 {
+		if id == 1 && needOffset {
 			for _, value := range []uint32{binary.LittleEndian.Uint32(header[24:28]), binary.LittleEndian.Uint32(header[20:24])} {
 				if value == 0xffffffff {
 					if len(field) < 8 {
@@ -174,11 +175,15 @@ func zipLocalOffset(header [46]byte, extra []byte) (uint64, error) {
 			if len(field) < 8 {
 				return 0, zip.ErrFormat
 			}
-			return binary.LittleEndian.Uint64(field[:8]), nil
+			offset = binary.LittleEndian.Uint64(field[:8])
+			needOffset = false
 		}
 		extra = extra[4+length:]
 	}
-	return 0, zip.ErrFormat
+	if needOffset {
+		return 0, zip.ErrFormat
+	}
+	return offset, nil
 }
 
 func validateZIPLocal(file io.ReaderAt, centralStart, offset int64, entry *zip.File) (zipSpan, error) {

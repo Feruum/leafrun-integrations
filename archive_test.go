@@ -101,6 +101,7 @@ func TestArchiveSourceProvidesRetainedStandardTree(t *testing.T) {
 				{name: "outside.txt", data: []byte("not selected")},
 			}
 			path, raw := writeArchive(t, kind, records)
+			canonical := canonicalArchivePath(t, path)
 			tempParent := t.TempDir()
 			tree, err := (ArchiveSource{Path: path, SourceRoot: "project", Options: ArchiveOptions{TempDir: tempParent}}).Open(context.Background())
 			if err != nil {
@@ -118,10 +119,10 @@ func TestArchiveSourceProvidesRetainedStandardTree(t *testing.T) {
 			if tree.Origin.ArchiveSHA256 != hex.EncodeToString(digest[:]) {
 				t.Fatalf("digest: %s", tree.Origin.ArchiveSHA256)
 			}
-			if tree.Origin.Location != path {
+			if tree.Origin.Location != canonical {
 				t.Fatalf("location: %q", tree.Origin.Location)
 			}
-			if len(tree.ProtectedPaths) != 1 || tree.ProtectedPaths[0] != path {
+			if len(tree.ProtectedPaths) != 1 || tree.ProtectedPaths[0] != canonical {
 				t.Fatalf("protected paths: %v", tree.ProtectedPaths)
 			}
 			if err := os.WriteFile(path, []byte("changed external archive"), 0600); err != nil {

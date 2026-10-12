@@ -62,178 +62,183 @@ func extractTAR(ctx context.Context, workspace *ownedWorkspace, root *os.Root, l
 	if err != nil {
 		return sourceErr(ErrorArchive, "stat tar", "", err)
 	}
-	if err := validatePhysicalTAR(ctx, file, info.Size(), limits); err != nil {
+	plans, err := planTAR(ctx, file, info.Size(), limits)
+	if err != nil {
 		return err
 	}
-	registry := make(pathRegistry)
-	var count int64
-	var prepared []preparedEntry
-	reader := tar.NewReader(io.NewSectionReader(file, 0, info.Size()))
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		header, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil && !(errors.Is(err, tar.ErrInsecurePath) && header != nil) {
-			return sourceErr(ErrorArchive, "read tar header", "", err)
-		}
-		if header.Typeflag == tar.TypeXGlobalHeader {
-			continue
-		}
-		directory := header.Typeflag == tar.TypeDir
-		if !directory && header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
-			return sourceErr(ErrorUnsupportedEntry, "validate tar", header.Name, errors.New("only ordinary files and directories are supported"))
-		}
-		entry, err := prepareEntry(registry, header.Name, directory, header.Size, &count, limits)
-		if err != nil {
-			return err
-		}
-		allowance := limits.MaxFileBytes
-		if directory {
-			allowance = 0
-		}
-		read, err := copyBounded(ctx, io.Discard, reader, allowance)
-		if err != nil {
-			return sourceErr(ErrorArchive, "validate tar data", header.Name, err)
-		}
-		if read != entry.size {
-			return sourceErr(ErrorArchive, "validate tar data", header.Name, io.ErrUnexpectedEOF)
-		}
-		prepared = append(prepared, entry)
-	}
-	reader = tar.NewReader(io.NewSectionReader(file, 0, info.Size()))
-	index := 0
 	writer := treeWriter{root: root}
-	for {
+	for _, plan := range plans {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		header, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil && !(errors.Is(err, tar.ErrInsecurePath) && header != nil) {
-			return sourceErr(ErrorArchive, "read tar header", "", err)
-		}
-		if header.Typeflag == tar.TypeXGlobalHeader {
-			continue
-		}
-		entry := prepared[index]
-		index++
-		read, err := writer.writeEntry(ctx, entry, reader, limits.MaxFileBytes)
+		reader := io.NewSectionReader(file, plan.dataOffset, plan.entry.size)
+		read, err := writer.writeEntry(ctx, plan.entry, reader, limits.MaxFileBytes)
 		if err != nil {
-			return sourceErr(ErrorArchive, "extract tar", header.Name, err)
+			return sourceErr(ErrorArchive, "extract tar", plan.entry.name, err)
 		}
-		if read != entry.size {
-			return sourceErr(ErrorArchive, "extract tar", header.Name, io.ErrUnexpectedEOF)
+		if read != plan.entry.size {
+			return sourceErr(ErrorArchive, "extract tar", plan.entry.name, io.ErrUnexpectedEOF)
 		}
 	}
+	return nil
 }
 
-// validatePhysicalTAR checks records that tar.Reader normally hides, including
-// PAX/GNU metadata names and superseded path values. The standard reader remains
-// responsible for header/numeric decoding and effective metadata semantics.
-func validatePhysicalTAR(ctx context.Context, file *os.File, total int64, limits Limits) error {
+type tarEntryPlan struct {
+	entry      preparedEntry
+	dataOffset int64
+}
+
+// planTAR validates all physical records before any tree writes. archive/tar
+// decodes base headers, while this planner applies persistent global PAX values
+// before local overrides and GNU long names. Effective sizes determine payload
+// boundaries; bytes named by global metadata cannot be discarded as padding.
+func planTAR(ctx context.Context, file *os.File, total int64, limits Limits) ([]tarEntryPlan, error) {
 	var offset int64
-	var paxSize *int64
+	var count int64
+	var plans []tarEntryPlan
+	registry := make(pathRegistry)
+	globals := make(map[string]string)
+	var local map[string]string
+	var longName string
 	pendingMetadata := false
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, err
 		}
 		var block [512]byte
 		if _, err := file.ReadAt(block[:], offset); err != nil {
-			return sourceErr(ErrorArchive, "read tar block", "", err)
+			return nil, sourceErr(ErrorArchive, "read tar block", "", err)
 		}
 		if bytes.Equal(block[:], make([]byte, 512)) {
 			if pendingMetadata {
-				return sourceErr(ErrorArchive, "tar metadata", "", errors.New("metadata has no following file or directory"))
+				return nil, sourceErr(ErrorArchive, "tar metadata", "", errors.New("metadata has no following file or directory"))
 			}
 			var second [512]byte
 			if _, err := file.ReadAt(second[:], offset+512); err != nil {
-				return sourceErr(ErrorArchive, "read tar terminator", "", err)
+				return nil, sourceErr(ErrorArchive, "read tar terminator", "", err)
 			}
 			if !bytes.Equal(second[:], make([]byte, 512)) {
-				return sourceErr(ErrorArchive, "tar terminator", "", errors.New("expected two zero blocks"))
+				return nil, sourceErr(ErrorArchive, "tar terminator", "", errors.New("expected two zero blocks"))
 			}
-			return validateTARTail(ctx, io.NewSectionReader(file, offset+1024, total-offset-1024))
+			if err := validateTARTail(ctx, io.NewSectionReader(file, offset+1024, total-offset-1024)); err != nil {
+				return nil, err
+			}
+			return plans, nil
 		}
 		header, err := physicalTARHeader(block)
 		if err != nil {
-			return sourceErr(ErrorArchive, "parse tar block", "", err)
+			return nil, sourceErr(ErrorArchive, "parse tar block", "", err)
 		}
 		flag := block[156]
-		directory := flag == tar.TypeDir || (flag == tar.TypeRegA && strings.HasSuffix(header.Name, "/"))
-		if _, err := portablePath(header.Name, directory, true); err != nil {
-			return sourceErr(ErrorUnsafePath, "validate tar record", header.Name, err)
+		rawDirectory := flag == tar.TypeDir || (flag == tar.TypeRegA && strings.HasSuffix(header.Name, "/"))
+		if _, err := portablePath(header.Name, rawDirectory, true); err != nil {
+			return nil, sourceErr(ErrorUnsafePath, "validate tar record", header.Name, err)
 		}
 		metadata := false
 		switch flag {
 		case tar.TypeReg, tar.TypeRegA, tar.TypeDir:
-			pendingMetadata = false
 		case tar.TypeXHeader, tar.TypeXGlobalHeader, tar.TypeGNULongName:
 			metadata = true
 			if flag != tar.TypeXGlobalHeader {
 				pendingMetadata = true
 			}
 		default:
-			return sourceErr(ErrorUnsupportedEntry, "validate tar record", header.Name, errors.New("link, sparse, or special record"))
+			return nil, sourceErr(ErrorUnsupportedEntry, "validate tar record", header.Name, errors.New("link, sparse, or special record"))
 		}
 		size := header.Size
-		if !metadata && paxSize != nil {
-			size = *paxSize
-			paxSize = nil
-		}
-		if directory && size != 0 {
-			return sourceErr(ErrorUnsupportedEntry, "validate tar record", header.Name, errors.New("directory has a payload"))
-		}
-		if !metadata && !directory && (size > limits.MaxFileBytes || size > limits.MaxTotalBytes) {
-			return sourceErr(ErrorLimit, "size", header.Name, errors.New("declared tar file size exceeded"))
+		name := header.Name
+		var entry preparedEntry
+		if !metadata {
+			if value, ok := effectivePAX("path", globals, local); ok {
+				name = value
+			}
+			if longName != "" {
+				name = longName
+			}
+			if value, ok := effectivePAX("size", globals, local); ok {
+				size, err = strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					return nil, sourceErr(ErrorArchive, "PAX effective size", value, err)
+				}
+			}
+			directory := flag == tar.TypeDir || (flag == tar.TypeRegA && strings.HasSuffix(name, "/"))
+			entry, err = prepareEntry(registry, name, directory, size, &count, limits)
+			if err != nil {
+				return nil, err
+			}
+			local, longName, pendingMetadata = nil, "", false
 		}
 		if size < 0 || size > total-offset-512 {
-			return sourceErr(ErrorArchive, "tar payload", header.Name, io.ErrUnexpectedEOF)
+			return nil, sourceErr(ErrorArchive, "tar payload", name, io.ErrUnexpectedEOF)
 		}
 		if metadata {
 			// archive/tar applies this same bound to its special-file payloads.
 			if size > 1<<20 {
-				return sourceErr(ErrorArchive, "tar metadata", header.Name, errors.New("metadata exceeds 1 MiB"))
+				return nil, sourceErr(ErrorArchive, "tar metadata", header.Name, errors.New("metadata exceeds 1 MiB"))
 			}
 			var captured bytes.Buffer
 			_, err := copyBounded(ctx, &captured, io.NewSectionReader(file, offset+512, size), size)
 			if err != nil {
-				return sourceErr(ErrorArchive, "read tar metadata", header.Name, err)
+				return nil, sourceErr(ErrorArchive, "read tar metadata", header.Name, err)
 			}
 			data := captured.Bytes()
 			if flag == tar.TypeGNULongName {
-				name := string(data)
-				if nul := strings.IndexByte(name, 0); nul >= 0 {
-					if strings.Trim(name[nul:], "\x00") != "" {
-						return sourceErr(ErrorArchive, "GNU long name", header.Name, errors.New("data after name terminator"))
+				longName = string(data)
+				if nul := strings.IndexByte(longName, 0); nul >= 0 {
+					if strings.Trim(longName[nul:], "\x00") != "" {
+						return nil, sourceErr(ErrorArchive, "GNU long name", header.Name, errors.New("data after name terminator"))
 					}
-					name = name[:nul]
+					longName = longName[:nul]
 				}
-				if _, err := portablePath(name, strings.HasSuffix(name, "/"), true); err != nil {
-					return sourceErr(ErrorUnsafePath, "GNU long name", name, err)
+				if _, err := portablePath(longName, strings.HasSuffix(longName, "/"), true); err != nil {
+					return nil, sourceErr(ErrorUnsafePath, "GNU long name", longName, err)
 				}
 			} else {
-				pendingSize, err := validatePAX(ctx, data)
+				parsed, err := parsePAX(ctx, data)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				if flag == tar.TypeXHeader {
-					paxSize = pendingSize
+					local = parsed
+				} else {
+					for key, value := range parsed {
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+						if value == "" {
+							delete(globals, key)
+						} else {
+							globals[key] = value
+						}
+					}
 				}
 			}
+		} else {
+			read, err := copyBounded(ctx, io.Discard, io.NewSectionReader(file, offset+512, size), limits.MaxFileBytes)
+			if err != nil {
+				return nil, sourceErr(ErrorArchive, "validate tar data", name, err)
+			}
+			if read != size {
+				return nil, sourceErr(ErrorArchive, "validate tar data", name, io.ErrUnexpectedEOF)
+			}
+			plans = append(plans, tarEntryPlan{entry: entry, dataOffset: offset + 512})
 		}
 		padding := (512 - size%512) % 512
 		if padding > total-offset-512-size {
-			return sourceErr(ErrorArchive, "tar padding", header.Name, io.ErrUnexpectedEOF)
+			return nil, sourceErr(ErrorArchive, "tar padding", name, io.ErrUnexpectedEOF)
 		}
 		offset += 512 + size + padding
 	}
+}
+
+// A local empty value suppresses a global value for this entry; an absent local
+// key inherits the active global value. Empty global values delete keys.
+func effectivePAX(key string, global, local map[string]string) (string, bool) {
+	if value, ok := local[key]; ok {
+		return value, value != ""
+	}
+	value, ok := global[key]
+	return value, ok
 }
 
 func physicalTARHeader(block [512]byte) (*tar.Header, error) {
@@ -291,8 +296,8 @@ func validateTARTail(ctx context.Context, reader io.Reader) error {
 	}
 }
 
-func validatePAX(ctx context.Context, data []byte) (*int64, error) {
-	var size *int64
+func parsePAX(ctx context.Context, data []byte) (map[string]string, error) {
+	parsed := make(map[string]string)
 	for len(data) > 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -306,7 +311,7 @@ func validatePAX(ctx context.Context, data []byte) (*int64, error) {
 			return nil, sourceErr(ErrorArchive, "PAX record", "", tar.ErrHeader)
 		}
 		key, value, ok := strings.Cut(string(data[space+1:length-1]), "=")
-		if !ok || key == "" {
+		if !ok || key == "" || strings.ContainsRune(key, 0) {
 			return nil, sourceErr(ErrorArchive, "PAX record", "", tar.ErrHeader)
 		}
 		if strings.HasPrefix(key, "GNU.sparse.") || strings.HasPrefix(key, "SCHILY.sparse.") || key == "SCHILY.realsize" {
@@ -314,17 +319,47 @@ func validatePAX(ctx context.Context, data []byte) (*int64, error) {
 		}
 		switch key {
 		case "path", "linkpath":
+			if value == "" {
+				break
+			}
 			if _, err := portablePath(value, strings.HasSuffix(value, "/"), true); err != nil {
 				return nil, sourceErr(ErrorUnsafePath, "PAX path", value, err)
 			}
 		case "size":
-			parsed, err := strconv.ParseInt(value, 10, 64)
-			if err != nil || parsed < 0 {
-				return nil, sourceErr(ErrorArchive, "PAX size", value, tar.ErrHeader)
+			if value == "" {
+				break
 			}
-			size = &parsed
+			number, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || number < 0 {
+				return nil, sourceErr(ErrorArchive, "PAX size", value, errors.Join(tar.ErrHeader, err))
+			}
+		case "uid", "gid":
+			if value == "" {
+				break
+			}
+			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+				return nil, sourceErr(ErrorArchive, "PAX owner", value, errors.Join(tar.ErrHeader, err))
+			}
+		case "atime", "mtime", "ctime":
+			if value == "" {
+				break
+			}
+			seconds, fraction, _ := strings.Cut(value, ".")
+			if _, err := strconv.ParseInt(seconds, 10, 64); err != nil {
+				return nil, sourceErr(ErrorArchive, "PAX time", value, errors.Join(tar.ErrHeader, err))
+			}
+			for _, digit := range fraction {
+				if digit < '0' || digit > '9' {
+					return nil, sourceErr(ErrorArchive, "PAX time", value, tar.ErrHeader)
+				}
+			}
+		case "uname", "gname":
+			if strings.ContainsRune(value, 0) {
+				return nil, sourceErr(ErrorArchive, "PAX owner name", value, tar.ErrHeader)
+			}
 		}
+		parsed[key] = value
 		data = data[length:]
 	}
-	return size, nil
+	return parsed, nil
 }
