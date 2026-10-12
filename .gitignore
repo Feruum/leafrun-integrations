@@ -1,0 +1,6 @@
+/.tools/
+/.cache/
+/go.work
+/go.work.sum
+*.test
+*.exe
