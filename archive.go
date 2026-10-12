@@ -57,7 +57,7 @@ func (s ArchiveSource) Open(ctx context.Context) (tree SourceTree, err error) {
 			tree = SourceTree{}
 		}
 	}()
-	location, digest, err := captureArchive(ctx, w, s.Path)
+	location, digest, protection, err := captureArchiveProtected(ctx, w, s.Path)
 	if err != nil {
 		return SourceTree{}, err
 	}
@@ -88,7 +88,7 @@ func (s ArchiveSource) Open(ctx context.Context) (tree SourceTree, err error) {
 	if err = ctx.Err(); err != nil {
 		return SourceTree{}, err
 	}
-	return SourceTree{FS: filesystem, Origin: SourceOrigin{Kind: kind, Location: location, SourceRoot: sourceRoot, ArchiveSHA256: digest}, ProtectedPaths: []string{location}, Close: w.close}, nil
+	return SourceTree{FS: filesystem, Origin: SourceOrigin{Kind: kind, Location: location, SourceRoot: sourceRoot, ArchiveSHA256: digest}, ProtectedPaths: []string{location}, NativeProtection: []NativeProtection{protection}, Close: w.close}, nil
 }
 
 func sourceErr(kind ErrorKind, op, name string, err error) error {
@@ -167,29 +167,39 @@ func copyBounded(ctx context.Context, dst io.Writer, src io.Reader, limit int64)
 // captureArchive hashes the same owned bytes that are later parsed. It never
 // reopens the external archive between hashing and extraction.
 func captureArchive(ctx context.Context, w *ownedWorkspace, original string) (location, digest string, err error) {
+	location, digest, _, err = captureArchiveProtected(ctx, w, original)
+	return location, digest, err
+}
+
+func captureArchiveProtected(ctx context.Context, w *ownedWorkspace, original string) (location, digest string, protection NativeProtection, err error) {
 	absolute, err := filepath.Abs(original)
 	if err != nil {
-		return "", "", sourceErr(ErrorInput, "resolve", original, err)
+		return "", "", NativeProtection{}, sourceErr(ErrorInput, "resolve", original, err)
 	}
 	location, err = filepath.EvalSymlinks(absolute)
 	if err != nil {
-		return "", "", sourceErr(ErrorInput, "resolve", original, err)
+		return "", "", NativeProtection{}, sourceErr(ErrorInput, "resolve", original, err)
 	}
 	input, err := openArchiveInput(ctx, location)
 	if err != nil {
-		return "", "", sourceErr(ErrorInput, "open", location, err)
+		return "", "", NativeProtection{}, sourceErr(ErrorInput, "open", location, err)
 	}
 	defer func() { err = errors.Join(err, input.Close()) }()
+	info, err := input.Stat()
+	if err != nil {
+		return "", "", NativeProtection{}, sourceErr(ErrorInput, "stat", location, err)
+	}
+	protection = NativeProtection{Path: location, Info: info}
 	output, err := w.root.OpenFile("archive", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		return "", "", sourceErr(ErrorInput, "capture", location, err)
+		return "", "", NativeProtection{}, sourceErr(ErrorInput, "capture", location, err)
 	}
 	defer func() { err = errors.Join(err, output.Close()) }()
 	hash := sha256.New()
 	if _, err = copyBounded(ctx, io.MultiWriter(output, hash), input, math.MaxInt64); err != nil {
-		return "", "", sourceErr(ErrorInput, "capture", location, err)
+		return "", "", NativeProtection{}, sourceErr(ErrorInput, "capture", location, err)
 	}
-	return location, hex.EncodeToString(hash.Sum(nil)), nil
+	return location, hex.EncodeToString(hash.Sum(nil)), protection, nil
 }
 
 func extractArchive(ctx context.Context, w *ownedWorkspace, root *os.Root, limits Limits) (kind string, err error) {

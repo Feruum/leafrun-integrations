@@ -23,6 +23,18 @@ type SourceTree struct {
 	Close  func() error
 	// ProtectedPaths contains original native input paths for output guards.
 	ProtectedPaths []string
+	// NativeProtection holds frozen identities of original native inputs. These
+	// are publication guards, not mirrors of FS or content validation inputs.
+	NativeProtection []NativeProtection
+}
+
+// NativeProtection protects a canonical absolute original path and its acquired
+// native identity. Directory guards cover the whole directory; regular file
+// identities additionally protect hardlink aliases after replacement or removal.
+// Info comes from an opened handle and stays usable after that handle is closed.
+type NativeProtection struct {
+	Path string
+	Info fs.FileInfo
 }
 
 // SourceOrigin records provenance separately from the project's content digest.
