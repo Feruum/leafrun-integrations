@@ -175,18 +175,11 @@ func captureArchive(ctx context.Context, w *ownedWorkspace, original string) (lo
 	if err != nil {
 		return "", "", sourceErr(ErrorInput, "resolve", original, err)
 	}
-	input, err := os.Open(location)
+	input, err := openArchiveInput(ctx, location)
 	if err != nil {
 		return "", "", sourceErr(ErrorInput, "open", location, err)
 	}
 	defer func() { err = errors.Join(err, input.Close()) }()
-	info, err := input.Stat()
-	if err != nil {
-		return "", "", sourceErr(ErrorInput, "stat", location, err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", "", sourceErr(ErrorInput, "open", location, errors.New("archive input is not a regular file"))
-	}
 	output, err := w.root.OpenFile("archive", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return "", "", sourceErr(ErrorInput, "capture", location, err)
