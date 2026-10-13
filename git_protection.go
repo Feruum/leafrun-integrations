@@ -17,14 +17,14 @@ func protectLocalGit(ctx context.Context, r *gitRunner, location string) ([]Nati
 	if err != nil {
 		return nil, "", sourceErr(ErrorInput, "local repository", location, err)
 	}
-	lines := strings.Split(strings.TrimSpace(data), "\n")
+	lines := strings.Split(stripGitLineTerminator(data), "\n")
 	if len(lines) != 3 {
 		return nil, "", sourceErr(ErrorInput, "local repository", location, errors.New("invalid native repository metadata response"))
 	}
 	seen := map[string]bool{}
 	var guards []NativeProtection
 	for _, name := range lines[1:] {
-		absolute, err := filepath.Abs(strings.TrimSpace(name))
+		absolute, err := filepath.Abs(name)
 		if err != nil {
 			return nil, "", err
 		}
@@ -86,12 +86,12 @@ func protectLocalGit(ctx context.Context, r *gitRunner, location string) ([]Nati
 		}
 	}
 	var working string
-	if strings.TrimSpace(lines[0]) == "false" {
+	if lines[0] == "false" {
 		data, err = r.output(ctx, "-C", location, "rev-parse", "--show-toplevel")
 		if err != nil {
 			return nil, "", err
 		}
-		working, err = filepath.EvalSymlinks(strings.TrimSpace(data))
+		working, err = filepath.EvalSymlinks(stripGitLineTerminator(data))
 		if err != nil {
 			return nil, "", err
 		}

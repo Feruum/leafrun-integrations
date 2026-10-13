@@ -37,8 +37,9 @@ func runNative(ctx context.Context, cmd *exec.Cmd, consume func(io.Reader) error
 	}
 	if err := group.started(cmd); err != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return err
+		cleanupErr := group.kill(cmd)
+		waitErr := cmd.Wait()
+		return errors.Join(err, cleanupErr, waitErr)
 	}
 	stderr := &boundedCapture{limit: 64 << 10}
 	errRead := make(chan error, 1)
@@ -46,7 +47,7 @@ func runNative(ctx context.Context, cmd *exec.Cmd, consume func(io.Reader) error
 	outRead := make(chan error, 1)
 	go func() { outRead <- consume(outR) }()
 	wait := make(chan error, 1)
-	go func() { wait <- cmd.Wait() }()
+	go func() { wait <- group.wait(cmd) }()
 	var cause, readErr, waitErr error
 	var stopErr error
 	stop := func() { stopErr = errors.Join(stopErr, group.kill(cmd)) }
@@ -71,6 +72,7 @@ func runNative(ctx context.Context, cmd *exec.Cmd, consume func(io.Reader) error
 	// A successful parent may leave descendants with inherited pipe handles.
 	// Terminate those descendants before awaiting descriptor readers.
 	killErr := group.kill(cmd)
+	waitErr = group.reap(cmd, waitErr)
 	_ = outW.Close()
 	_ = errW.Close()
 	if !readDone {

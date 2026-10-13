@@ -13,6 +13,9 @@ import (
 
 type nativeProcessGroup struct{ job windows.Handle }
 
+func (*nativeProcessGroup) wait(cmd *exec.Cmd) error              { return cmd.Wait() }
+func (*nativeProcessGroup) reap(_ *exec.Cmd, waitErr error) error { return waitErr }
+
 func prepareProcess(cmd *exec.Cmd) (*nativeProcessGroup, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {

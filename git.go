@@ -282,7 +282,7 @@ func (r *gitRunner) transport(ctx context.Context, location string) (gitTranspor
 	if err != nil {
 		return gitTransport{}, sourceErr(ErrorInput, "expand native git URL", redactTransport(location), err)
 	}
-	effective := strings.TrimSuffix(strings.TrimSuffix(data, "\n"), "\r")
+	effective := stripGitLineTerminator(data)
 	effective, _, err = gitLocation(effective)
 	if err != nil {
 		return gitTransport{}, sourceErr(ErrorOptions, "effective repository", redactTransport(data), err)
@@ -296,6 +296,12 @@ func (r *gitRunner) transport(ctx context.Context, location string) (gitTranspor
 	transport := gitTransport{effective: effective, alias: alias}
 	r.transports[location] = transport
 	return transport, nil
+}
+
+// Native repository paths are not portable project entry names. Preserve their
+// spaces and tabs; only the command's final output record terminator is removed.
+func stripGitLineTerminator(value string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "\r")
 }
 
 func resolveGitRef(ctx context.Context, r *gitRunner, location, ref string) (string, error) {
