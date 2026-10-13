@@ -45,3 +45,79 @@ func TestUnixDetachedDescendantsExitedOnReturn(t *testing.T) {
 		}
 	}
 }
+
+func TestDarwinExitWatchBlockedChild(t *testing.T) {
+	if os.Getenv("LEAFRUN_DARWIN_EXIT_WATCH_FIXTURE") != "1" {
+		return
+	}
+	if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDarwinExitWatchAcceptsOriginalWaitableZombie(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDarwinExitWatchBlockedChild$")
+	cmd.Env = append(os.Environ(), "LEAFRUN_DARWIN_EXIT_WATCH_FIXTURE=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := false
+	defer func() {
+		if !reaped {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+	live, err := unixProcess(cmd.Process.Pid)
+	if err != nil || live.exited || live.group != cmd.Process.Pid {
+		t.Fatalf("capture original stdin-blocked live child: %#v, %v", live, err)
+	}
+	if err := input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		current, err := unixProcess(live.pid)
+		if err != nil || current.birth != live.birth || current.group != live.group {
+			t.Fatalf("original child identity changed before reaping: %#v, %v", current, err)
+		}
+		if current.exited {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("owned child did not reach a waitable zombie state:", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	t.Logf("original live snapshot now identifies a waitable zombie: pid=%d group=%d birth=%s", live.pid, live.group, live.birth)
+	// Pass the deliberately stale live snapshot: registration must account for
+	// the same original identity becoming a zombie before EVFILT_PROC attachment.
+	watch, err := newUnixExitWatch(live)
+	if watch != nil {
+		defer watch.close()
+	}
+	if err != nil {
+		t.Fatal("register exit watch for original already-exited identity:", err)
+	}
+	if watch != nil {
+		exited, err := watch.exited()
+		if err != nil || !exited {
+			t.Fatalf("original waitable zombie must already satisfy the exit barrier: exited=%v, %v", exited, err)
+		}
+	}
+	err = cmd.Wait()
+	reaped = true
+	if err != nil {
+		t.Fatal("reap successfully completed owned child:", err)
+	}
+}
