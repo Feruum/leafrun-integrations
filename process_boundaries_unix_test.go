@@ -4,10 +4,12 @@ package integrations
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -25,6 +27,17 @@ func TestGitLocalRepositoryTrailingSpace(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tree.Close()
+}
+
+func TestUnixProcessDisappearancePreservesOtherNativeFailures(t *testing.T) {
+	for _, failure := range []error{syscall.EBADF, syscall.EACCES, syscall.EIO} {
+		if onlyProcessDisappearance(errors.Join(syscall.ESRCH, failure)) {
+			t.Fatalf("disappearance must not discard additional native failure %v", failure)
+		}
+	}
+	if !onlyProcessDisappearance(fmt.Errorf("native member vanished: %w", syscall.ESRCH)) {
+		t.Fatal("an isolated native disappearance should need no new process descriptor")
+	}
 }
 
 func TestDetachedOutputHelper(t *testing.T) {

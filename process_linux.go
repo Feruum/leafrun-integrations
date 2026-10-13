@@ -12,6 +12,8 @@ import (
 
 type linuxExitWatch struct{ fd int }
 
+func signalUnixGroup(group int) error { return unix.Kill(-group, unix.SIGKILL) }
+
 func checkUnixExitWatch() error {
 	fd, err := unix.PidfdOpen(os.Getpid(), 0)
 	if err != nil {

@@ -109,6 +109,9 @@ func TestDarwinExitWatchAcceptsOriginalWaitableZombie(t *testing.T) {
 		}
 	}
 	t.Logf("original live snapshot now identifies a waitable zombie: pid=%d group=%d birth=%s", live.pid, live.group, live.birth)
+	if err := signalUnixGroup(live.group); err != nil {
+		t.Fatal("native signal of a revalidated exited-only original group:", err)
+	}
 	// Pass the deliberately stale live snapshot: registration must account for
 	// the same original identity becoming a zombie before EVFILT_PROC attachment.
 	watch, err := newUnixExitWatch(live)
@@ -123,6 +126,23 @@ func TestDarwinExitWatchAcceptsOriginalWaitableZombie(t *testing.T) {
 		if err != nil || !exited {
 			t.Fatalf("original waitable zombie must already satisfy the exit barrier: exited=%v, %v", exited, err)
 		}
+	}
+	for _, name := range []string{"birth", "group"} {
+		t.Run("reject-mismatched-"+name, func(t *testing.T) {
+			mismatch := live
+			if name == "birth" {
+				mismatch.birth += "-different-original-identity"
+			} else {
+				mismatch.group++
+			}
+			watch, err := newUnixExitWatch(mismatch)
+			if watch != nil {
+				defer watch.close()
+			}
+			if watch != nil || !errors.Is(err, syscall.ESRCH) {
+				t.Fatalf("mismatched %s must retain the native registration cause: watch=%v, %v", name, watch, err)
+			}
+		})
 	}
 	err = cmd.Wait()
 	reaped = true

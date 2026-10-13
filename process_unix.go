@@ -70,7 +70,7 @@ func (g *nativeProcessGroup) retain(info unixProcessInfo) error {
 		return nil
 	}
 	watch, err := newUnixExitWatch(info)
-	if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrNotExist) {
+	if onlyProcessDisappearance(err) {
 		return nil
 	}
 	if err != nil {
@@ -80,6 +80,27 @@ func (g *nativeProcessGroup) retain(info unixProcessInfo) error {
 		g.watches[key] = watch
 	}
 	return nil
+}
+
+// A vanished member needs no new exit descriptor. Preserve any additional
+// native failure, including a failed close joined to a disappearance cause.
+func onlyProcessDisappearance(err error) bool {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !onlyProcessDisappearance(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return onlyProcessDisappearance(wrapped.Unwrap())
+	}
+	return err == syscall.ESRCH || err == syscall.ENOENT || err == os.ErrNotExist
 }
 
 func (g *nativeProcessGroup) capture() (bool, error) {
@@ -107,16 +128,21 @@ func (g *nativeProcessGroup) capture() (bool, error) {
 func (g *nativeProcessGroup) kill(*exec.Cmd) error {
 	for {
 		owned, captureErr := g.capture()
+		live := false
 		var observationErr error
 		for _, watch := range g.watches {
-			_, err := watch.exited()
+			exited, err := watch.exited()
 			observationErr = errors.Join(observationErr, err)
+			live = live || !exited || err != nil
 		}
 		var signalErr error
-		if owned {
-			signalErr = syscall.Kill(-g.pid, syscall.SIGKILL)
-			if errors.Is(signalErr, syscall.ESRCH) {
+		if owned && (live || captureErr != nil) {
+			signalErr = signalUnixGroup(g.pid)
+			if onlyProcessDisappearance(signalErr) {
 				signalErr = nil
+			}
+			if signalErr != nil {
+				signalErr = fmt.Errorf("terminate operation-owned process group %d: %w", g.pid, signalErr)
 			}
 		}
 		// Observation failures must still await every retained original member
@@ -134,7 +160,7 @@ func (g *nativeProcessGroup) kill(*exec.Cmd) error {
 		if captureErr != nil {
 			return captureErr
 		}
-		live := false
+		live = false
 		for _, watch := range g.watches {
 			exited, err := watch.exited()
 			if err != nil {
