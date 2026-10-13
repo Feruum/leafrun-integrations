@@ -55,6 +55,15 @@ func TestDarwinExitWatchBlockedChild(t *testing.T) {
 	}
 }
 
+func TestDarwinMissingProcessSnapshotReportsESRCH(t *testing.T) {
+	// KERN_PROC_PID performs an exact PID match. Negative IDs cannot identify
+	// a process, which makes zero-record absence deterministic without PID reuse.
+	_, err := unixProcess(-1)
+	if !errors.Is(err, syscall.ESRCH) {
+		t.Fatal("snapshot of a nonexistent native process must report ESRCH:", err)
+	}
+}
+
 func TestDarwinExitWatchAcceptsOriginalWaitableZombie(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

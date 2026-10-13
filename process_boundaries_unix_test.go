@@ -74,4 +74,7 @@ func TestUnixParentExitObservationKeepsLeaderWaitable(t *testing.T) {
 	if err != nil || info.group != cmd.Process.Pid || !info.exited {
 		t.Fatalf("original group leader must remain waitable after exit observation: %#v, %v", info, err)
 	}
+	if err := group.kill(cmd); err != nil {
+		t.Fatal("teardown of an original zombie-only group:", err)
+	}
 }
